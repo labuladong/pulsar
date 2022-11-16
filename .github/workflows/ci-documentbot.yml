@@ -33,13 +33,13 @@ concurrency:
 
 jobs:
   label:
-    if: (github.repository == 'apache/pulsar') && (github.event.pull_request.state == 'open')
+    if: (github.repository == 'labuladong/pulsar') && (github.event.pull_request.state == 'open')
     permissions:
       pull-requests: write 
     runs-on: ubuntu-20.04
     steps:
       - name: Labeling
-        uses: apache/pulsar-test-infra/docbot@master
+        uses: labuladong/pulsar-test-infra/docbot@master
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           LABEL_WATCH_LIST: 'doc,doc-required,doc-not-needed,doc-complete'
