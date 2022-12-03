@@ -1300,7 +1300,7 @@ public class ManagedCursorImpl implements ManagedCursor {
         final PositionImpl newPosition = (PositionImpl) newPos;
 
         // order trim and reset operations on a ledger
-        ledger.getExecutor().executeOrdered(ledger.getName(), safeRun(() -> {
+        ledger.getExecutor().execute(safeRun(() -> {
             PositionImpl actualPosition = newPosition;
 
             if (!ledger.isValidPosition(actualPosition)
@@ -1997,7 +1997,7 @@ public class ManagedCursorImpl implements ManagedCursor {
                         + "is later.", mdEntry.newPosition, persistentMarkDeletePosition);
             }
             // run with executor to prevent deadlock
-            ledger.getExecutor().executeOrdered(ledger.getName(), safeRun(() -> mdEntry.triggerComplete()));
+            ledger.getExecutor().execute(safeRun(() -> mdEntry.triggerComplete()));
             return;
         }
 
@@ -2016,7 +2016,7 @@ public class ManagedCursorImpl implements ManagedCursor {
                         + "in progress {} is later.", mdEntry.newPosition, inProgressLatest);
             }
             // run with executor to prevent deadlock
-            ledger.getExecutor().executeOrdered(ledger.getName(), safeRun(() -> mdEntry.triggerComplete()));
+            ledger.getExecutor().execute(safeRun(() -> mdEntry.triggerComplete()));
             return;
         }
 
@@ -2623,8 +2623,8 @@ public class ManagedCursorImpl implements ManagedCursor {
 
     @Override
     public void asyncClose(final AsyncCallbacks.CloseCallback callback, final Object ctx) {
-        State oldState = STATE_UPDATER.getAndSet(this, State.Closing);
-        if (oldState == State.Closed || oldState == State.Closing) {
+        boolean alreadyClosing = !trySetStateToClosing();
+        if (alreadyClosing) {
             log.info("[{}] [{}] State is already closed", ledger.getName(), name);
             callback.closeComplete(ctx);
             return;
@@ -2705,6 +2705,28 @@ public class ManagedCursorImpl implements ManagedCursor {
                 }
             }
         });
+    }
+
+    /**
+     * Try set {@link #state} to {@link State#Closing}.
+     * @return false if the {@link #state} already is {@link State#Closing} or {@link State#Closed}.
+     */
+    private boolean trySetStateToClosing() {
+        final AtomicBoolean notClosing = new AtomicBoolean(false);
+        STATE_UPDATER.updateAndGet(this, state -> {
+            switch (state){
+                case Closing:
+                case Closed: {
+                    notClosing.set(false);
+                    return state;
+                }
+                default: {
+                    notClosing.set(true);
+                    return State.Closing;
+                }
+            }
+        });
+        return notClosing.get();
     }
 
     private void flushPendingMarkDeletes() {

@@ -268,12 +268,12 @@ public class PulsarStandalone implements AutoCloseable {
 
     private boolean usingNewDefaultsPIP117;
 
-    private final String writeCacheMaxSizeMb = "dbStorage_writeCacheMaxSizeMb";
-
-    private final String readAheadCacheMaxSizeMb = "dbStorage_readAheadCacheMaxSizeMb";
-
-
     public void start() throws Exception {
+        if (config == null) {
+            log.error("Failed to load configuration");
+            System.exit(1);
+        }
+
         String forceUseZookeeperEnv = System.getenv(PULSAR_STANDALONE_USE_ZOOKEEPER);
 
         // Allow forcing to use ZK mode via an env variable. eg:
@@ -287,11 +287,6 @@ public class PulsarStandalone implements AutoCloseable {
         } else {
             // There's no existing ZK data directory, or we're already using RocksDB for metadata
             usingNewDefaultsPIP117 = true;
-        }
-
-        if (config == null) {
-            log.error("Failed to load configuration");
-            System.exit(1);
         }
 
         log.debug("--- setup PulsarStandaloneStarter ---");
@@ -451,16 +446,7 @@ public class PulsarStandalone implements AutoCloseable {
 
         ServerConfiguration bkServerConf = new ServerConfiguration();
         bkServerConf.loadConf(new File(configFile).toURI().toURL());
-        Object writeCache = bkServerConf.getProperty(writeCacheMaxSizeMb);
-        Object readCache = bkServerConf.getProperty(readAheadCacheMaxSizeMb);
-        // we need add one broker to calculate the default cache
-        long defaultCacheMB = PlatformDependent.maxDirectMemory() / (1024 * 1024) / (1 + numOfBk) / 4;
-        if (writeCache == null || writeCache.equals("")) {
-            bkServerConf.setProperty(writeCacheMaxSizeMb, defaultCacheMB);
-        }
-        if (readCache == null || readCache.equals("")) {
-            bkServerConf.setProperty(readAheadCacheMaxSizeMb, defaultCacheMB);
-        }
+        calculateCacheSize(bkServerConf);
         bkCluster = BKCluster.builder()
                 .baseServerConfiguration(bkServerConf)
                 .metadataServiceUri(metadataStoreUrl)
@@ -477,13 +463,29 @@ public class PulsarStandalone implements AutoCloseable {
         log.info("Starting BK & ZK cluster");
         ServerConfiguration bkServerConf = new ServerConfiguration();
         bkServerConf.loadConf(new File(configFile).toURI().toURL());
-
+        calculateCacheSize(bkServerConf);
         // Start LocalBookKeeper
         bkEnsemble = new LocalBookkeeperEnsemble(
                 this.getNumOfBk(), this.getZkPort(), this.getBkPort(), this.getStreamStoragePort(), this.getZkDir(),
                 this.getBkDir(), this.isWipeData(), "127.0.0.1");
         bkEnsemble.startStandalone(bkServerConf, !this.isNoStreamStorage());
         config.setMetadataStoreUrl("zk:127.0.0.1:" + zkPort);
+    }
+
+    private void calculateCacheSize(ServerConfiguration bkServerConf) {
+        String writeCacheMaxSizeMb = "dbStorage_writeCacheMaxSizeMb";
+        String readAheadCacheMaxSizeMb = "dbStorage_readAheadCacheMaxSizeMb";
+        Object writeCache = bkServerConf.getProperty(writeCacheMaxSizeMb);
+        Object readCache = bkServerConf.getProperty(readAheadCacheMaxSizeMb);
+        // we need to add one broker and one zk (if needed) to calculate the default cache
+        int instanceCount = usingNewDefaultsPIP117 ? (1 + numOfBk) : (2 + numOfBk);
+        long defaultCacheMB = PlatformDependent.maxDirectMemory() / (1024 * 1024) / instanceCount / 4;
+        if (writeCache == null || writeCache.equals("")) {
+            bkServerConf.setProperty(writeCacheMaxSizeMb, defaultCacheMB);
+        }
+        if (readCache == null || readCache.equals("")) {
+            bkServerConf.setProperty(readAheadCacheMaxSizeMb, defaultCacheMB);
+        }
     }
 
     private static void processTerminator(int exitCode) {
