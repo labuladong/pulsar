@@ -165,21 +165,6 @@ public abstract class AdminResource extends PulsarWebResource {
         return FutureUtil.waitForAll(futures);
     }
 
-    protected CompletableFuture<Void> tryCreateExtendedPartitionsAsync(int oldNumPartitions, int numPartitions) {
-        if (!topicName.isPersistent()) {
-            return CompletableFuture.completedFuture(null);
-        }
-        if (numPartitions <= oldNumPartitions) {
-            return CompletableFuture.failedFuture(new RestException(Status.NOT_ACCEPTABLE,
-                    "Number of new partitions must be greater than existing number of partitions"));
-        }
-        List<CompletableFuture<Void>> futures = new ArrayList<>(numPartitions - oldNumPartitions);
-        for (int i = oldNumPartitions; i < numPartitions; i++) {
-            futures.add(tryCreatePartitionAsync(i));
-        }
-        return FutureUtil.waitForAll(futures);
-    }
-
     private CompletableFuture<Void> tryCreatePartitionAsync(final int partition) {
         CompletableFuture<Void> result = new CompletableFuture<>();
         getPulsarResources().getTopicResources().createPersistentTopicAsync(topicName.getPartition(partition))
@@ -823,12 +808,15 @@ public abstract class AdminResource extends PulsarWebResource {
     protected void validatePersistencePolicies(PersistencePolicies persistence) {
         checkNotNull(persistence, "persistence policies should not be null");
         final ServiceConfiguration config = pulsar().getConfiguration();
-        checkArgument(persistence.getBookkeeperEnsemble() <= config.getManagedLedgerMaxEnsembleSize(),
-                "Bookkeeper-Ensemble must be <= " + config.getManagedLedgerMaxEnsembleSize());
-        checkArgument(persistence.getBookkeeperWriteQuorum() <= config.getManagedLedgerMaxWriteQuorum(),
-                "Bookkeeper-WriteQuorum must be <= " + config.getManagedLedgerMaxWriteQuorum());
-        checkArgument(persistence.getBookkeeperAckQuorum() <= config.getManagedLedgerMaxAckQuorum(),
-                "Bookkeeper-AckQuorum must be <= " + config.getManagedLedgerMaxAckQuorum());
+        checkArgument(persistence.getBookkeeperEnsemble() <= config.getManagedLedgerMaxEnsembleSize()
+                        && persistence.getBookkeeperEnsemble() > 0,
+                "Bookkeeper-Ensemble must be <= " + config.getManagedLedgerMaxEnsembleSize() + " and > 0.");
+        checkArgument(persistence.getBookkeeperWriteQuorum() <= config.getManagedLedgerMaxWriteQuorum()
+                        && persistence.getBookkeeperWriteQuorum() > 0,
+                "Bookkeeper-WriteQuorum must be <= " + config.getManagedLedgerMaxWriteQuorum() + " and > 0.");
+        checkArgument(persistence.getBookkeeperAckQuorum() <= config.getManagedLedgerMaxAckQuorum()
+                        && persistence.getBookkeeperAckQuorum() > 0,
+                "Bookkeeper-AckQuorum must be <= " + config.getManagedLedgerMaxAckQuorum() + " and > 0.");
         checkArgument(
                 (persistence.getBookkeeperEnsemble() >= persistence.getBookkeeperWriteQuorum())
                         && (persistence.getBookkeeperWriteQuorum() >= persistence.getBookkeeperAckQuorum()),
