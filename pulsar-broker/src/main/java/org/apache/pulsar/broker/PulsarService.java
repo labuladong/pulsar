@@ -87,6 +87,7 @@ import org.apache.pulsar.broker.loadbalance.LoadManager;
 import org.apache.pulsar.broker.loadbalance.LoadReportUpdaterTask;
 import org.apache.pulsar.broker.loadbalance.LoadResourceQuotaUpdaterTask;
 import org.apache.pulsar.broker.loadbalance.LoadSheddingTask;
+import org.apache.pulsar.broker.loadbalance.extensions.ExtensibleLoadManagerImpl;
 import org.apache.pulsar.broker.lookup.v1.TopicLookup;
 import org.apache.pulsar.broker.namespace.NamespaceService;
 import org.apache.pulsar.broker.protocol.ProtocolHandlers;
@@ -146,6 +147,7 @@ import org.apache.pulsar.common.util.Reflections;
 import org.apache.pulsar.common.util.ThreadDumpUtil;
 import org.apache.pulsar.common.util.netty.EventLoopUtil;
 import org.apache.pulsar.compaction.Compactor;
+import org.apache.pulsar.compaction.StrategicTwoPhaseCompactor;
 import org.apache.pulsar.compaction.TwoPhaseCompactor;
 import org.apache.pulsar.functions.worker.ErrorNotifier;
 import org.apache.pulsar.functions.worker.WorkerConfig;
@@ -198,6 +200,7 @@ public class PulsarService implements AutoCloseable, ShutdownService {
     private TopicPoliciesService topicPoliciesService = TopicPoliciesService.DISABLED;
     private BookKeeperClientFactory bkClientFactory;
     private Compactor compactor;
+    private StrategicTwoPhaseCompactor strategicCompactor;
     private ResourceUsageTransportManager resourceUsageTransportManager;
     private ResourceGroupService resourceGroupServiceManager;
 
@@ -742,10 +745,7 @@ public class PulsarService implements AutoCloseable, ShutdownService {
             }
             pulsarResources = newPulsarResources();
 
-            orderedExecutor = OrderedExecutor.newBuilder()
-                    .numThreads(config.getNumOrderedExecutorThreads())
-                    .name("pulsar-ordered")
-                    .build();
+            orderedExecutor = newOrderedExecutor();
 
             // Initialize the message protocol handlers
             protocolHandlers = ProtocolHandlers.load(config);
@@ -819,6 +819,17 @@ public class PulsarService implements AutoCloseable, ShutdownService {
                 this.webSocketService.setLocalCluster(clusterData);
             }
 
+            // Start the leader election service
+            startLeaderElectionService();
+
+            // By starting the Load manager service, the broker will also become visible
+            // to the rest of the broker by creating the registration z-node. This needs
+            // to be done only when the broker is fully operative.
+            //
+            // The load manager service and its service unit state channel need to be initialized first
+            // (namespace service depends on load manager)
+            this.startLoadManagementService();
+
             // Initialize namespace service, after service url assigned. Should init zk and refresh self owner info.
             this.nsService.initialize();
 
@@ -828,9 +839,6 @@ public class PulsarService implements AutoCloseable, ShutdownService {
             }
 
             this.topicPoliciesService.start();
-
-            // Start the leader election service
-            startLeaderElectionService();
 
             // Register heartbeat and bootstrap namespaces.
             this.nsService.registerBootstrapNamespaces();
@@ -859,11 +867,6 @@ public class PulsarService implements AutoCloseable, ShutdownService {
             }
 
             this.metricsGenerator = new MetricsGenerator(this);
-
-            // By starting the Load manager service, the broker will also become visible
-            // to the rest of the broker by creating the registration z-node. This needs
-            // to be done only when the broker is fully operative.
-            this.startLoadManagementService();
 
             // Initialize the message protocol handlers.
             // start the protocol handlers only after the broker is ready,
@@ -917,6 +920,14 @@ public class PulsarService implements AutoCloseable, ShutdownService {
         } finally {
             mutex.unlock();
         }
+    }
+
+    @VisibleForTesting
+    protected OrderedExecutor newOrderedExecutor() {
+        return OrderedExecutor.newBuilder()
+                .numThreads(config.getNumOrderedExecutorThreads())
+                .name("pulsar-ordered")
+                .build();
     }
 
     @VisibleForTesting
@@ -1096,6 +1107,10 @@ public class PulsarService implements AutoCloseable, ShutdownService {
     }
 
     protected void startLeaderElectionService() {
+        if (ExtensibleLoadManagerImpl.isLoadManagerExtensionEnabled(config)) {
+            LOG.info("The load manager extension is enabled. Skipping PulsarService LeaderElectionService.");
+            return;
+        }
         this.leaderElectionService = new LeaderElectionService(coordinationService, getSafeWebServiceAddress(),
                 state -> {
                     if (state == LeaderElectionState.Leading) {
@@ -1200,7 +1215,7 @@ public class PulsarService implements AutoCloseable, ShutdownService {
         LOG.info("Starting load management service ...");
         this.loadManager.get().start();
 
-        if (config.isLoadBalancerEnabled()) {
+        if (config.isLoadBalancerEnabled() && !ExtensibleLoadManagerImpl.isLoadManagerExtensionEnabled(config)) {
             LOG.info("Starting load balancer");
             if (this.loadReportTask == null) {
                 long loadReportMinInterval = config.getLoadBalancerReportUpdateMinIntervalMillis();
@@ -1471,6 +1486,19 @@ public class PulsarService implements AutoCloseable, ShutdownService {
     // to avoid unnecessary lock competition.
     public Compactor getNullableCompactor() {
         return this.compactor;
+    }
+
+    public StrategicTwoPhaseCompactor newStrategicCompactor() throws PulsarServerException {
+        return new StrategicTwoPhaseCompactor(this.getConfiguration(),
+                getClient(), getBookKeeperClient(),
+                getCompactorExecutor());
+    }
+
+    public synchronized StrategicTwoPhaseCompactor getStrategicCompactor() throws PulsarServerException {
+        if (this.strategicCompactor == null) {
+            this.strategicCompactor = newStrategicCompactor();
+        }
+        return this.strategicCompactor;
     }
 
     protected synchronized OrderedScheduler getOffloaderScheduler(OffloadPoliciesImpl offloadPolicies) {
